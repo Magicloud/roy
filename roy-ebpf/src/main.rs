@@ -1,20 +1,39 @@
 #![no_std]
 #![no_main]
 
-use aya_ebpf::{bindings::xdp_action, macros::xdp, programs::XdpContext};
+use aya_ebpf::{
+    EbpfContext,
+    bindings::sk_action,
+    helpers::{bpf_get_current_comm, generated::bpf_get_current_cgroup_id},
+    macros::{cgroup_sock_addr, map},
+    maps::RingBuf,
+    programs::SockAddrContext,
+};
 use aya_log_ebpf::info;
+use roy_common::EventV4;
 
-#[xdp]
-pub fn roy(ctx: XdpContext) -> u32 {
-    match try_roy(ctx) {
-        Ok(ret) => ret,
-        Err(_) => xdp_action::XDP_ABORTED,
+#[map]
+static EVENTS: RingBuf = RingBuf::with_byte_size(128 * 1024, 0);
+
+#[cgroup_sock_addr(connect4)]
+pub fn roy4(ctx: SockAddrContext) -> i32 {
+    // info!(&ctx, "received a connect");
+    let sock_addr = unsafe { &*ctx.sock_addr };
+    let cgroup = unsafe { bpf_get_current_cgroup_id() };
+    let cmd = bpf_get_current_comm().unwrap_or_default();
+
+    if let Some(mut buf) = EVENTS.reserve::<EventV4>(0) {
+        buf.write(EventV4 {
+            pid: ctx.pid(),
+            cgroup,
+            cmd,
+            addr: sock_addr.user_ip4,
+            port: sock_addr.user_port,
+            ..Default::default()
+        });
+        buf.submit(0);
     }
-}
-
-fn try_roy(ctx: XdpContext) -> Result<u32, u32> {
-    info!(&ctx, "received a packet");
-    Ok(xdp_action::XDP_PASS)
+    sk_action::SK_PASS as i32
 }
 
 #[cfg(not(test))]

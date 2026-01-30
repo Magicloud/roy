@@ -1,10 +1,6 @@
 [workspace]
 resolver = "2"
-members = [
-    "roy",
-    "roy-common",
-    "roy-ebpf",
-]
+members = ["roy", "roy-common", "roy-ebpf"]
 default-members = ["roy", "roy-common"]
 
 [workspace.package]

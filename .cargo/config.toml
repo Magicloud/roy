@@ -1,2 +1,2 @@
 [target."cfg(all())"]
-runner = "sudo -E"
+runner = "sudo -E env -u https_proxy RUST_LOG=DEBUG"

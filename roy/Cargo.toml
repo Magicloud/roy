@@ -22,6 +22,15 @@ tokio = { workspace = true, features = [
     "signal",
 ] }
 clap = { workspace = true, features = ["derive"] }
+bytemuck = { version = "*", default-features = false, features = ["derive"] }
+k8s-openapi = { version = "*", features = ["earliest"] }
+kube = { version = "*" }
+async_from = { version = "*" }
+procfs = { version = "*" }
+async-walkdir = { version = "*" }
+futures = { version = "*" }
+ipnetwork = { version = "*" }
+
 [build-dependencies]
 anyhow = { workspace = true }
 aya-build = { workspace = true }
