@@ -1,9 +1,13 @@
 [package]
 name = "roy"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
-
+description.workspace = true
 license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme.workspace = true
 
 [dependencies]
 roy-common = { path = "../roy-common", features = ["user"] }

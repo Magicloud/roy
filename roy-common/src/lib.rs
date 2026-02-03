@@ -1,4 +1,15 @@
 #![no_std]
+#![warn(clippy::cargo)]
+#![warn(clippy::complexity)]
+#![warn(clippy::correctness)]
+#![warn(clippy::nursery)]
+#![warn(clippy::pedantic)]
+#![warn(clippy::perf)]
+#![warn(clippy::style)]
+#![warn(clippy::suspicious)]
+#![allow(clippy::future_not_send)]
+#![allow(clippy::multiple_crate_versions)]
+#![allow(clippy::wildcard_dependencies)]
 
 use bytemuck::{Pod, Zeroable};
 

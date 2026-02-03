@@ -1438,7 +1438,7 @@ dependencies = [
 
 [[package]]
 name = "roy"
-version = "0.1.0"
+version = "2026.2.3"
 dependencies = [
  "anyhow",
  "async-walkdir",
@@ -1464,7 +1464,7 @@ dependencies = [
 
 [[package]]
 name = "roy-common"
-version = "0.1.0"
+version = "2026.2.3"
 dependencies = [
  "aya",
  "bytemuck",
@@ -1472,7 +1472,7 @@ dependencies = [
 
 [[package]]
 name = "roy-ebpf"
-version = "0.1.0"
+version = "2026.2.3"
 dependencies = [
  "aya-ebpf",
  "aya-log-ebpf",

@@ -1,5 +1,16 @@
 #![no_std]
 #![no_main]
+#![warn(clippy::cargo)]
+#![warn(clippy::complexity)]
+#![warn(clippy::correctness)]
+#![warn(clippy::nursery)]
+#![warn(clippy::pedantic)]
+#![warn(clippy::perf)]
+#![warn(clippy::style)]
+#![warn(clippy::suspicious)]
+#![allow(clippy::future_not_send)]
+#![allow(clippy::multiple_crate_versions)]
+#![allow(clippy::wildcard_dependencies)]
 
 use aya_ebpf::{
     EbpfContext,
@@ -9,15 +20,14 @@ use aya_ebpf::{
     maps::RingBuf,
     programs::SockAddrContext,
 };
-use aya_log_ebpf::info;
 use roy_common::EventV4;
 
 #[map]
-static EVENTS: RingBuf = RingBuf::with_byte_size(128 * 1024, 0);
+static EVENTS: RingBuf = RingBuf::with_byte_size(1024, 0); // Let's see if 1KiB is enough
 
+#[allow(clippy::needless_pass_by_value)]
 #[cgroup_sock_addr(connect4)]
 pub fn roy4(ctx: SockAddrContext) -> i32 {
-    // info!(&ctx, "received a connect");
     let sock_addr = unsafe { &*ctx.sock_addr };
     let cgroup = unsafe { bpf_get_current_cgroup_id() };
     let cmd = bpf_get_current_comm().unwrap_or_default();
@@ -33,7 +43,7 @@ pub fn roy4(ctx: SockAddrContext) -> i32 {
         });
         buf.submit(0);
     }
-    sk_action::SK_PASS as i32
+    sk_action::SK_PASS.cast_signed()
 }
 
 #[cfg(not(test))]

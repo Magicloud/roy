@@ -1,3 +1,15 @@
+#![warn(clippy::cargo)]
+#![warn(clippy::complexity)]
+#![warn(clippy::correctness)]
+#![warn(clippy::nursery)]
+#![warn(clippy::pedantic)]
+#![warn(clippy::perf)]
+#![warn(clippy::style)]
+#![warn(clippy::suspicious)]
+#![allow(clippy::future_not_send)]
+#![allow(clippy::multiple_crate_versions)]
+#![allow(clippy::wildcard_dependencies)]
+
 use std::{fs, net::SocketAddr, os::unix::fs::MetadataExt};
 
 use anyhow::anyhow;
@@ -27,7 +39,7 @@ async fn main() -> anyhow::Result<()> {
         rlim_cur: libc::RLIM_INFINITY,
         rlim_max: libc::RLIM_INFINITY,
     };
-    let ret = unsafe { libc::setrlimit(libc::RLIMIT_MEMLOCK, &rlim) };
+    let ret = unsafe { libc::setrlimit(libc::RLIMIT_MEMLOCK, &raw const rlim) };
     if ret != 0 {
         debug!("remove limit on locked memory failed, ret is: {ret}");
     }
@@ -68,44 +80,38 @@ async fn main() -> anyhow::Result<()> {
     let mut ring = AsyncFd::with_interest(ring, Interest::READABLE)?;
     loop {
         let mut guard = ring.readable_mut().await?;
-        match guard.try_io(|inner| {
+        if let Ok(x) = guard.try_io(|inner| {
             inner
                 .get_mut()
                 .next()
-                .ok_or(std::io::Error::new(
-                    std::io::ErrorKind::WouldBlock,
-                    "no data",
-                ))
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::WouldBlock, "no data"))
                 .map(|x| {
                     let message: &EventV4 = bytemuck::from_bytes(x.as_ref());
                     *message
                 })
         }) {
-            Ok(x) => {
-                let x = x?;
-                let lan = [
-                    "192.168.0.0/16",
-                    "10.0.0.0/8",
-                    "172.16.0.0/12",
-                    // "127.0.0.0/8",
-                    "169.254.0.0/16",
-                    // "224.0.0.0/4",
-                    "240.0.0.0/4",
-                ]
-                .into_iter()
-                .map(|x| x.parse())
-                .collect::<Result<Vec<IpNetwork>, IpNetworkError>>()?;
-                let ip = (x.addr.to_le_bytes() as [u8; 4]).into();
-                if lan.iter().all(|subnet| !subnet.contains(ip))
-                    && !ip.is_loopback()
-                    && !ip.is_multicast()
-                    && !ip.is_unspecified()
-                {
-                    let event: Event = x.async_try_into().await?;
-                    info!("{event:?}");
-                }
+            let x = x?;
+            let lan = [
+                "192.168.0.0/16",
+                "10.0.0.0/8",
+                "172.16.0.0/12",
+                // "127.0.0.0/8",
+                "169.254.0.0/16",
+                // "224.0.0.0/4",
+                "240.0.0.0/4",
+            ]
+            .into_iter()
+            .map(str::parse)
+            .collect::<Result<Vec<IpNetwork>, IpNetworkError>>()?;
+            let ip = (x.addr.to_le_bytes() as [u8; 4]).into();
+            if lan.iter().all(|subnet| !subnet.contains(ip))
+                && !ip.is_loopback()
+                && !ip.is_multicast()
+                && !ip.is_unspecified()
+            {
+                let event: Event = x.async_try_into().await?;
+                info!("{event:?}");
             }
-            Err(_) => continue,
         }
     }
 }
@@ -121,58 +127,53 @@ impl AsyncTryFrom<EventV4> for Event {
     type Error = anyhow::Error;
 
     async fn async_try_from(value: EventV4) -> Result<Self, Self::Error> {
-        let (pod_uid, cmd) = match Process::new(value.pid.try_into()?) {
-            Ok(proc) => {
-                let pod_uid = proc
-                    .cgroups()?
-                    .into_iter()
-                    .filter_map(|x| {
-                        let segs = x.pathname.split('/');
-                        // first path seg should be "kubepods"
-                        segs.skip_while(|x| *x != "kubepods")
-                            .find(|x| x.starts_with("pod"))
-                            .and_then(|x| x.strip_prefix("pod").map(|x| x.to_string()))
-                    })
-                    .next()
-                    .ok_or(anyhow!("Could not find Pod UID for PID {}", value.pid))?;
-                let cmd = match proc.cmdline() {
-                    Ok(x) => PidOrCmd::Cmdline(x),
-                    Err(_) => PidOrCmd::Pid(value.pid),
-                };
+        let (pod_uid, cmd) = if let Ok(proc) = Process::new(value.pid.try_into()?) {
+            let pod_uid = proc
+                .cgroups()?
+                .into_iter()
+                .find_map(|x| {
+                    let segs = x.pathname.split('/');
+                    // first path seg should be "kubepods"
+                    segs.skip_while(|x| *x != "kubepods")
+                        .find(|x| x.starts_with("pod"))
+                        .and_then(|x| x.strip_prefix("pod").map(std::string::ToString::to_string))
+                })
+                .ok_or_else(|| anyhow!("Could not find Pod UID for PID {}", value.pid))?;
+            let cmd = proc
+                .cmdline()
+                .map_or(PidOrCmd::Pid(value.pid), PidOrCmd::Cmdline);
 
-                (pod_uid, cmd)
-            }
-            Err(_) => {
-                // The process is exited.
-                let mut pod_uid = None;
-                while let Some(x) = WalkDir::new("/sys/fs/cgroup/kubepods")
-                    .filter(|x| async move {
-                        if x.file_type().await.map(|x| x.is_dir()).unwrap_or_default() {
-                            Filtering::Continue
-                        } else {
-                            Filtering::Ignore
-                        }
-                    })
-                    .next()
-                    .await
-                {
-                    let cgroup_folder = x?;
-                    if cgroup_folder
-                        .metadata()
-                        .await
-                        .is_ok_and(|x| x.ino() == value.cgroup)
-                    {
-                        pod_uid = cgroup_folder
-                            .path()
-                            .to_str()
-                            .and_then(|x| x.strip_prefix("pod").map(|x| x.to_string()));
-                        break;
+            (pod_uid, cmd)
+        } else {
+            // The process is exited.
+            let mut pod_uid = None;
+            while let Some(x) = WalkDir::new("/sys/fs/cgroup/kubepods")
+                .filter(|x| async move {
+                    if x.file_type().await.is_ok_and(|x| x.is_dir()) {
+                        Filtering::Continue
+                    } else {
+                        Filtering::Ignore
                     }
+                })
+                .next()
+                .await
+            {
+                let cgroup_folder = x?;
+                if cgroup_folder
+                    .metadata()
+                    .await
+                    .is_ok_and(|x| x.ino() == value.cgroup)
+                {
+                    pod_uid = cgroup_folder
+                        .path()
+                        .to_str()
+                        .and_then(|x| x.strip_prefix("pod").map(std::string::ToString::to_string));
+                    break;
                 }
-                let cmd = PidOrCmd::PartialCmd(String::from_utf8_lossy(&value.cmd).into());
-
-                (pod_uid.unwrap_or_default(), cmd)
             }
+            let cmd = PidOrCmd::PartialCmd(String::from_utf8_lossy(&value.cmd).into());
+
+            (pod_uid.unwrap_or_default(), cmd)
         };
         let pods: Api<Pod> = Api::all(Client::try_default().await?);
         let pod = pods
@@ -184,12 +185,12 @@ impl AsyncTryFrom<EventV4> for Event {
                 namespace: x.metadata.namespace,
                 name: x.metadata.name.unwrap_or_default(),
             })
-            .ok_or(anyhow!("Could not find the Pod for PID {}", value.pid))?;
+            .ok_or_else(|| anyhow!("Could not find the Pod for PID {}", value.pid))?;
         Ok(Self {
             process: cmd,
             socket_addr: (
                 value.addr.to_le_bytes() as [u8; 4],
-                (value.port as u16).to_be(),
+                u16::try_from(value.port)?.to_be(),
             )
                 .into(),
             pod,
