@@ -1,0 +1,100 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: roy
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["list", "get"]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: roy
+  namespace: kube-system
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: roy
+subjects:
+- kind: ServiceAccount
+  name: roy
+  namespace: kube-system
+roleRef:
+  kind: ClusterRole
+  name: roy
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: roy
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      app: roy
+  template:
+    metadata:
+      labels:
+        app: roy
+    spec:
+      serviceAccountName: roy
+      automountServiceAccountToken: true
+      hostNetwork: true
+      containers:
+      - name: roy
+        image: localhost:5000/roy:test20
+        command: ["sh", "-c", "sleep infinity"]
+        securityContext:
+          # privileged: true
+          capabilities:
+            add:
+              - BPF
+              - SYS_RESOURCE
+              - NET_ADMIN
+              - PERFMON
+              # - SYS_BOOT
+              # - SYS_MODULE
+              # - SYS_RAWIO
+              # - SYS_TIME
+              # - MAC_ADMIN
+              # - MAC_OVERRIDE
+              # - SYS_NICE
+              # - IPC_LOCK
+              # - SETGID
+              # - SETUID
+              # - FSETID
+              # - SYS_PACCT
+              # - SYS_TTY_CONFIG
+              # - LINUX_IMMUTABLE
+              # - NET_BROADCAST
+              # - NET_RAW
+              # - NET_BIND_SERVICE
+              # - SYSLOG
+              # - IPC_OWNER
+              # - DAC_OVERRIDE
+              # - DAC_READ_SEARCH
+        volumeMounts:
+        - name: cgroup
+          mountPath: /sys/fs/cgroup
+          readOnly: true
+        - name: proc
+          mountPath: /host/proc
+          readOnly: true
+        env:
+        - name: RUST_LOG
+          value: DEBUG
+        - name: RUST_BACKTRACE
+          value: "1"
+      volumes:
+        - name: cgroup
+          hostPath:
+            path: /sys/fs/cgroup
+            type: Directory
+        - name: proc
+          hostPath:
+            path: /proc
+            type: Directory

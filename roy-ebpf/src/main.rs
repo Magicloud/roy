@@ -28,6 +28,7 @@ static EVENTS: RingBuf = RingBuf::with_byte_size(1024, 0); // Let's see if 1KiB 
 #[allow(clippy::needless_pass_by_value)]
 #[cgroup_sock_addr(connect4)]
 pub fn roy4(ctx: SockAddrContext) -> i32 {
+    aya_log_ebpf::debug!(&ctx, "Enter");
     let sock_addr = unsafe { &*ctx.sock_addr };
     let cgroup = unsafe { bpf_get_current_cgroup_id() };
     let cmd = bpf_get_current_comm().unwrap_or_default();

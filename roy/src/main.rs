@@ -10,25 +10,28 @@
 #![allow(clippy::multiple_crate_versions)]
 #![allow(clippy::wildcard_dependencies)]
 
-use std::{fs, net::SocketAddr, os::unix::fs::MetadataExt};
+use std::{net::SocketAddr, os::unix::fs::MetadataExt, path::PathBuf};
 
 use async_from::{AsyncTryFrom, AsyncTryInto};
-use async_walkdir::{Filtering, WalkDir};
 use aya::{
     maps::RingBuf,
     programs::{CgroupAttachMode, CgroupSockAddr},
 };
-use eyre::eyre;
-use futures::StreamExt;
+use eyre::{Result, eyre};
+use futures::{FutureExt, Stream, StreamExt, TryStreamExt};
 use ipnetwork::{IpNetwork, IpNetworkError};
 use k8s_openapi::api::core::v1::Pod;
 use kube::{Api, Client, api::ListParams};
+use tokio_stream::wrappers::ReadDirStream;
 use tracing::instrument;
 #[rustfmt::skip]
 use tracing::{debug, info, warn};
 use procfs::process::Process;
 use roy_common::EventV4;
-use tokio::io::{Interest, unix::AsyncFd};
+use tokio::{
+    fs::DirEntry,
+    io::{Interest, unix::AsyncFd},
+};
 use tracing_subscriber::{fmt::format::FmtSpan, layer::SubscriberExt, util::SubscriberInitExt};
 
 #[instrument]
@@ -49,7 +52,9 @@ async fn main() -> eyre::Result<()> {
     };
     let ret = unsafe { libc::setrlimit(libc::RLIMIT_MEMLOCK, &raw const rlim) };
     if ret != 0 {
-        debug!("remove limit on locked memory failed, ret is: {ret}");
+        info!(
+            "remove limit on locked memory failed, ret is: {ret}. This is fine for new kernel that use the memcg based accounting."
+        );
     }
 
     // This will include your eBPF object file as raw bytes at compile-time and load it at
@@ -71,7 +76,7 @@ async fn main() -> eyre::Result<()> {
             tokio::task::spawn(async move {
                 loop {
                     let mut guard = logger.readable_mut().await.unwrap();
-                    guard.get_inner_mut().flush();
+                    // guard.get_inner_mut().flush();
                     guard.clear_ready();
                 }
             });
@@ -80,8 +85,10 @@ async fn main() -> eyre::Result<()> {
 
     let program: &mut CgroupSockAddr = ebpf.program_mut("roy4").unwrap().try_into()?;
     program.load()?;
-    // K3S cgroup
-    let cgroup = fs::File::open("/sys/fs/cgroup/kubepods")?;
+    let cgroup = guess_kubepods_cgroup()
+        .await?
+        .ok_or_else(|| eyre!("Could not find K8S Cgroup"))?;
+    let cgroup = std::fs::File::open(cgroup)?;
     program.attach(cgroup, CgroupAttachMode::Single)?;
 
     let ring = RingBuf::try_from(ebpf.map_mut("EVENTS").unwrap())?;
@@ -98,28 +105,33 @@ async fn main() -> eyre::Result<()> {
                     *message
                 })
         }) {
-            let x = x?;
-            let lan = [
-                "192.168.0.0/16",
-                "10.0.0.0/8",
-                "172.16.0.0/12",
-                // "127.0.0.0/8",
-                "169.254.0.0/16",
-                // "224.0.0.0/4",
-                "240.0.0.0/4",
-            ]
-            .into_iter()
-            .map(str::parse)
-            .collect::<Result<Vec<IpNetwork>, IpNetworkError>>()?;
-            let ip = (x.addr.to_le_bytes() as [u8; 4]).into();
-            if lan.iter().all(|subnet| !subnet.contains(ip))
-                && !ip.is_loopback()
-                && !ip.is_multicast()
-                && !ip.is_unspecified()
-            {
-                let event: Event = x.async_try_into().await?;
-                info!("{event:?}");
-            }
+            tokio::task::spawn(async {
+                let x = x?;
+                let lan = [
+                    "192.168.0.0/16",
+                    "10.0.0.0/8",
+                    "172.16.0.0/12",
+                    // "127.0.0.0/8",
+                    "169.254.0.0/16",
+                    // "224.0.0.0/4",
+                    "240.0.0.0/4",
+                ]
+                .into_iter()
+                .map(str::parse)
+                .collect::<Result<Vec<IpNetwork>, IpNetworkError>>()?;
+                let ip = (x.addr.to_le_bytes() as [u8; 4]).into();
+                debug!("{ip:?}");
+                if lan.iter().all(|subnet| !subnet.contains(ip))
+                    && !ip.is_loopback()
+                    && !ip.is_multicast()
+                    && !ip.is_unspecified()
+                {
+                    let event: Event = x.async_try_into().await?;
+                    info!("{event:?}");
+                }
+                Ok(()) as eyre::Result<()>
+            })
+            .await??;
         }
     }
 }
@@ -128,72 +140,79 @@ async fn main() -> eyre::Result<()> {
 struct Event {
     process: PidOrCmd,
     socket_addr: SocketAddr,
-    pod: K8SID,
+    pod: Option<K8SPod>,
 }
 #[async_from::async_trait]
 impl AsyncTryFrom<EventV4> for Event {
-    type Error = eyre::Error;
+    type Error = eyre::Report;
 
     async fn async_try_from(value: EventV4) -> Result<Self, Self::Error> {
-        let (pod_uid, cmd) = if let Ok(proc) = Process::new(value.pid.try_into()?) {
-            let pod_uid = proc
-                .cgroups()?
-                .into_iter()
-                .find_map(|x| {
-                    let segs = x.pathname.split('/');
-                    // first path seg should be "kubepods"
-                    segs.skip_while(|x| *x != "kubepods")
-                        .find(|x| x.starts_with("pod"))
-                        .and_then(|x| x.strip_prefix("pod").map(std::string::ToString::to_string))
-                })
-                .ok_or_else(|| eyre!("Could not find Pod UID for PID {}", value.pid))?;
-            let cmd = proc
-                .cmdline()
-                .map_or(PidOrCmd::Pid(value.pid), PidOrCmd::Cmdline);
-
-            (pod_uid, cmd)
-        } else {
-            // The process is exited.
-            let mut pod_uid = None;
-            while let Some(x) = WalkDir::new("/sys/fs/cgroup/kubepods")
-                .filter(|x| async move {
-                    if x.file_type().await.is_ok_and(|x| x.is_dir()) {
-                        Filtering::Continue
-                    } else {
-                        Filtering::Ignore
+        let (pc, cmd): (Option<(String, String)>, PidOrCmd) = match get_info_from_process(&value) {
+            Ok(x) => x,
+            Err(e) => {
+                info!("{e:?}");
+                match get_info_from_cgroup(&value).await {
+                    Ok(x) => x,
+                    Err(e) => {
+                        info!("{e:?}");
+                        (
+                            None,
+                            PidOrCmd::PartialCmd(String::from_utf8_lossy(&value.cmd).into()),
+                        )
                     }
-                })
-                .next()
-                .await
-            {
-                let cgroup_folder = x?;
-                if cgroup_folder
-                    .metadata()
-                    .await
-                    .is_ok_and(|x| x.ino() == value.cgroup)
-                {
-                    pod_uid = cgroup_folder
-                        .path()
-                        .to_str()
-                        .and_then(|x| x.strip_prefix("pod").map(std::string::ToString::to_string));
-                    break;
                 }
             }
-            let cmd = PidOrCmd::PartialCmd(String::from_utf8_lossy(&value.cmd).into());
-
-            (pod_uid.unwrap_or_default(), cmd)
         };
-        let pods: Api<Pod> = Api::all(Client::try_default().await?);
-        let pod = pods
-            .list_metadata(&ListParams::default())
-            .await?
-            .into_iter()
-            .find(|x| x.metadata.uid.as_ref().is_some_and(|x| *x == pod_uid))
-            .map(|x| K8SID {
-                namespace: x.metadata.namespace,
-                name: x.metadata.name.unwrap_or_default(),
-            })
-            .ok_or_else(|| eyre!("Could not find the Pod for PID {}", value.pid))?;
+        let mut ret = None;
+        if let Some((pod_uid, container_uid)) = pc {
+            debug!("Pod: {pod_uid}");
+            debug!("Container: {container_uid}");
+            let client = Client::try_default().await?;
+            let pods: Api<Pod> = Api::all(client.clone());
+            let pod = pods
+                .list_metadata(&ListParams::default())
+                .await?
+                .into_iter()
+                .find(|x| x.metadata.uid.as_ref().is_some_and(|x| pod_uid.contains(x)));
+            if pod.is_some() {
+                debug!("Found pod");
+            } else {
+                debug!("Found no pod");
+            }
+            if let Some((ns, n)) = pod.and_then(|p| {
+                p.metadata
+                    .namespace
+                    .and_then(|ns| p.metadata.name.map(|n| (ns, n)))
+            }) {
+                let pods: Api<Pod> = Api::namespaced(client, &ns);
+                let pod = pods.get_opt(&n).await?;
+                let container = pod.and_then(|p| {
+                    // Is it possible that I cannot find the container?
+                    Some(
+                        p.status?
+                            .container_statuses?
+                            .iter()
+                            .find(|cs| {
+                                cs.container_id
+                                    .as_ref()
+                                    .is_some_and(|x| x.contains(&container_uid))
+                            })?
+                            .name
+                            .clone(),
+                    )
+                });
+                if container.is_some() {
+                    debug!("Found container");
+                } else {
+                    debug!("Found no container");
+                }
+                ret = container.map(|c| K8SPod {
+                    namespace: ns,
+                    name: n,
+                    container_name: c,
+                });
+            }
+        }
         Ok(Self {
             process: cmd,
             socket_addr: (
@@ -201,15 +220,84 @@ impl AsyncTryFrom<EventV4> for Event {
                 u16::try_from(value.port)?.to_be(),
             )
                 .into(),
-            pod,
+            pod: ret,
         })
     }
 }
 
+fn get_info_from_process(value: &EventV4) -> Result<(Option<(String, String)>, PidOrCmd)> {
+    let proc = Process::new_with_root(PathBuf::from("/host/proc").join(value.pid.to_string()))?;
+    debug!("get proc");
+    let (pod_uid, container_uid) = proc
+        .cgroups()?
+        .into_iter()
+        .find_map(|x| {
+            let mut segs = x.pathname.split('/');
+            if segs.next()?.contains("kubepods") {
+                let _pod_type = segs.next()?;
+                let pod = segs.next()?;
+                let container = segs.next()?;
+                Some((pod.to_owned(), container.to_owned()))
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| {
+            eyre!(
+                "Could not extract pod/container data from cgroup for PID {}",
+                value.pid
+            )
+        })?;
+    let cmd = proc
+        .cmdline()
+        .map_or(PidOrCmd::Pid(value.pid), PidOrCmd::Cmdline);
+
+    Ok((Some((pod_uid, container_uid)), cmd)) as eyre::Result<_>
+}
+
+async fn get_info_from_cgroup(value: &EventV4) -> Result<(Option<(String, String)>, PidOrCmd)> {
+    let containers = walk_containers()
+        .await?
+        .ok_or_else(|| eyre!("Kubepods CGROUP not found"))?;
+    let container = containers
+        .try_filter_map(|container| {
+            async {
+                if container.metadata().await?.ino() == value.cgroup {
+                    Ok(Some(container))
+                } else {
+                    Ok(None)
+                }
+            }
+            .boxed()
+        })
+        .next()
+        .await
+        .transpose()?;
+    let pod = container.as_ref().and_then(|x| {
+        x.path()
+            .parent()
+            .and_then(|x| x.file_name())
+            .and_then(|x| x.to_str())
+            .map(std::borrow::ToOwned::to_owned)
+    });
+
+    let cmd = PidOrCmd::PartialCmd(String::from_utf8_lossy(&value.cmd).into());
+
+    Ok((
+        pod.and_then(|p| {
+            container
+                .and_then(|x| x.file_name().to_str().map(std::borrow::ToOwned::to_owned))
+                .map(|c| (p, c))
+        }),
+        cmd,
+    )) as Result<_>
+}
+
 #[derive(Debug)]
-struct K8SID {
-    namespace: Option<String>,
+struct K8SPod {
+    namespace: String,
     name: String,
+    container_name: String,
 }
 
 #[derive(Debug)]
@@ -217,4 +305,74 @@ enum PidOrCmd {
     Pid(u32),
     Cmdline(Vec<String>),
     PartialCmd(String),
+}
+
+async fn guess_kubepods_cgroup() -> Result<Option<PathBuf>> {
+    let mut root = tokio::fs::read_dir("/sys/fs/cgroup").await?;
+    let mut ret = None;
+    while let Some(subdir) = root.next_entry().await? {
+        if subdir
+            .file_name()
+            .into_string()
+            .map_err(|x| eyre!("Unable to handle {x:?}"))?
+            .contains("kubepods")
+        {
+            ret = Some(subdir.path());
+            break;
+        }
+    }
+    info!("{ret:?}");
+    Ok(ret)
+}
+
+async fn walk_containers() -> Result<Option<impl Stream<Item = Result<DirEntry, std::io::Error>>>> {
+    if let Some(kubepods) = guess_kubepods_cgroup().await? {
+        let pods = ReadDirStream::new(tokio::fs::read_dir(kubepods).await?)
+            .try_filter_map(|x| {
+                async move {
+                    match x.file_type().await {
+                        Ok(y) => {
+                            if y.is_dir() {
+                                Ok(Some(
+                                    ReadDirStream::new(tokio::fs::read_dir(x.path()).await?)
+                                        .try_filter_map(|z| {
+                                            async {
+                                                z.file_type().await.map(|w| {
+                                                    if w.is_dir() { Some(z) } else { None }
+                                                })
+                                            }
+                                            .boxed()
+                                        }),
+                                ))
+                            } else {
+                                Ok(None)
+                            }
+                        }
+                        Err(e) => Err(e),
+                    }
+                }
+                .boxed()
+            })
+            .try_flatten();
+        let containers = pods
+            .and_then(|pod| {
+                async move {
+                    let ret = ReadDirStream::new(tokio::fs::read_dir(pod.path()).await?)
+                        .try_filter_map(|x| {
+                            async move {
+                                x.file_type()
+                                    .await
+                                    .map(|y| if y.is_dir() { Some(x) } else { None })
+                            }
+                            .boxed()
+                        });
+                    Ok(ret)
+                }
+                .boxed()
+            })
+            .try_flatten();
+        Ok(Some(containers))
+    } else {
+        Ok(None)
+    }
 }

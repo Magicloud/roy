@@ -22,12 +22,12 @@ eyre = { version = "*" }
 color-eyre = { version = "*" }
 libc = { version = "*" }
 tokio = { version = "*", features = ["full"] }
+tokio-stream = { version = "*", features = ["full"] }
 # clap = { version = "*", features = ["derive"] }
 k8s-openapi = { version = "*", features = ["earliest"] }
 kube = { version = "*" }
 async_from = { version = "*" }
 procfs = { version = "*" }
-async-walkdir = { version = "*" }
 futures = { version = "*" }
 ipnetwork = { version = "*" }
 tracing = { version = "*" }
