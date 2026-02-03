@@ -23,16 +23,23 @@ use futures::StreamExt;
 use ipnetwork::{IpNetwork, IpNetworkError};
 use k8s_openapi::api::core::v1::Pod;
 use kube::{Api, Client, api::ListParams};
+use tracing::instrument;
 #[rustfmt::skip]
-use log::{debug, warn, info};
+use tracing::{debug, info, warn};
 use procfs::process::Process;
 use roy_common::EventV4;
 use tokio::io::{Interest, unix::AsyncFd};
+use tracing_subscriber::{fmt::format::FmtSpan, layer::SubscriberExt, util::SubscriberInitExt};
 
+#[instrument]
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::EnvFilter::from_default_env())
+        .with(tracing_subscriber::fmt::layer().with_span_events(FmtSpan::NONE))
+        .with(tracing_error::ErrorLayer::default())
+        .try_init()?;
     color_eyre::install()?;
-    env_logger::init();
 
     // Bump the memlock rlimit. This is needed for older kernels that don't use the
     // new memcg based accounting, see https://lwn.net/Articles/837122/

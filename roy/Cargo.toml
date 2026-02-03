@@ -16,18 +16,12 @@ aya = { workspace = true }
 aya-log = { workspace = true }
 bytemuck = { workspace = true, default-features = false, features = ["derive"] }
 
+
+# Tried Smol. AsyncIO crate involves unsafe. Why Tokio AsyncFd could work without me to unsafe?
 eyre = { version = "*" }
 color-eyre = { version = "*" }
-env_logger = { version = "*" }
 libc = { version = "*" }
-log = { version = "*" }
-tokio = { version = "*", features = [
-    "macros",
-    "rt",
-    "rt-multi-thread",
-    "net",
-    "signal",
-] }
+tokio = { version = "*", features = ["full"] }
 # clap = { version = "*", features = ["derive"] }
 k8s-openapi = { version = "*", features = ["earliest"] }
 kube = { version = "*" }
@@ -36,6 +30,9 @@ procfs = { version = "*" }
 async-walkdir = { version = "*" }
 futures = { version = "*" }
 ipnetwork = { version = "*" }
+tracing = { version = "*" }
+tracing-error = { version = "*" }
+tracing-subscriber = { version = "*", features = ["env-filter"] }
 
 [build-dependencies]
 aya-build = { workspace = true }
