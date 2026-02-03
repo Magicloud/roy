@@ -8,21 +8,21 @@ license.workspace = true
 [dependencies]
 roy-common = { path = "../roy-common", features = ["user"] }
 
-anyhow = { workspace = true, default-features = true }
 aya = { workspace = true }
 aya-log = { workspace = true }
-env_logger = { workspace = true }
-libc = { workspace = true }
-log = { workspace = true }
-tokio = { workspace = true, features = [
+bytemuck = { workspace = true, default-features = false, features = ["derive"] }
+anyhow = { version = "*" }
+env_logger = { version = "*" }
+libc = { version = "*" }
+log = { version = "*" }
+tokio = { version = "*", features = [
     "macros",
     "rt",
     "rt-multi-thread",
     "net",
     "signal",
 ] }
-clap = { workspace = true, features = ["derive"] }
-bytemuck = { version = "*", default-features = false, features = ["derive"] }
+clap = { version = "*", features = ["derive"] }
 k8s-openapi = { version = "*", features = ["earliest"] }
 kube = { version = "*" }
 async_from = { version = "*" }
@@ -32,9 +32,10 @@ futures = { version = "*" }
 ipnetwork = { version = "*" }
 
 [build-dependencies]
-anyhow = { workspace = true }
 aya-build = { workspace = true }
-cargo_metadata = { workspace = true }
+
+anyhow = { version = "*" }
+cargo_metadata = { version = "*" }
 # TODO(https://github.com/rust-lang/cargo/issues/12375): this should be an artifact dependency, but
 # it's not possible to tell cargo to use `-Z build-std` to build it. We cargo-in-cargo in the build
 # script to build this, but we want to teach cargo about the dependency so that cache invalidation
