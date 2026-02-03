@@ -12,13 +12,13 @@
 
 use std::{fs, net::SocketAddr, os::unix::fs::MetadataExt};
 
-use anyhow::anyhow;
 use async_from::{AsyncTryFrom, AsyncTryInto};
 use async_walkdir::{Filtering, WalkDir};
 use aya::{
     maps::RingBuf,
     programs::{CgroupAttachMode, CgroupSockAddr},
 };
+use eyre::eyre;
 use futures::StreamExt;
 use ipnetwork::{IpNetwork, IpNetworkError};
 use k8s_openapi::api::core::v1::Pod;
@@ -30,7 +30,8 @@ use roy_common::EventV4;
 use tokio::io::{Interest, unix::AsyncFd};
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> eyre::Result<()> {
+    color_eyre::install()?;
     env_logger::init();
 
     // Bump the memlock rlimit. This is needed for older kernels that don't use the
@@ -124,7 +125,7 @@ struct Event {
 }
 #[async_from::async_trait]
 impl AsyncTryFrom<EventV4> for Event {
-    type Error = anyhow::Error;
+    type Error = eyre::Error;
 
     async fn async_try_from(value: EventV4) -> Result<Self, Self::Error> {
         let (pod_uid, cmd) = if let Ok(proc) = Process::new(value.pid.try_into()?) {
@@ -138,7 +139,7 @@ impl AsyncTryFrom<EventV4> for Event {
                         .find(|x| x.starts_with("pod"))
                         .and_then(|x| x.strip_prefix("pod").map(std::string::ToString::to_string))
                 })
-                .ok_or_else(|| anyhow!("Could not find Pod UID for PID {}", value.pid))?;
+                .ok_or_else(|| eyre!("Could not find Pod UID for PID {}", value.pid))?;
             let cmd = proc
                 .cmdline()
                 .map_or(PidOrCmd::Pid(value.pid), PidOrCmd::Cmdline);
@@ -185,7 +186,7 @@ impl AsyncTryFrom<EventV4> for Event {
                 namespace: x.metadata.namespace,
                 name: x.metadata.name.unwrap_or_default(),
             })
-            .ok_or_else(|| anyhow!("Could not find the Pod for PID {}", value.pid))?;
+            .ok_or_else(|| eyre!("Could not find the Pod for PID {}", value.pid))?;
         Ok(Self {
             process: cmd,
             socket_addr: (
