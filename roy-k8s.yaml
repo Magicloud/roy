@@ -40,43 +40,32 @@ spec:
     metadata:
       labels:
         app: roy
+        logs: disabled
     spec:
       serviceAccountName: roy
       automountServiceAccountToken: true
       hostNetwork: true
+      dnsPolicy: "None"
+      dnsConfig:
+        nameservers:
+          - "10.43.0.10"
+        searches:
+          - "kube-system.svc.cluster.local"
+          - "svc.cluster.local"
+          - "cluster.local"
+        options:
+          - name: ndots
+            value: "5"
       containers:
       - name: roy
-        image: localhost:5000/roy:test20
-        command: ["sh", "-c", "sleep infinity"]
+        image: localhost:5000/roy:test31
         securityContext:
-          # privileged: true
           capabilities:
             add:
               - BPF
               - SYS_RESOURCE
               - NET_ADMIN
               - PERFMON
-              # - SYS_BOOT
-              # - SYS_MODULE
-              # - SYS_RAWIO
-              # - SYS_TIME
-              # - MAC_ADMIN
-              # - MAC_OVERRIDE
-              # - SYS_NICE
-              # - IPC_LOCK
-              # - SETGID
-              # - SETUID
-              # - FSETID
-              # - SYS_PACCT
-              # - SYS_TTY_CONFIG
-              # - LINUX_IMMUTABLE
-              # - NET_BROADCAST
-              # - NET_RAW
-              # - NET_BIND_SERVICE
-              # - SYSLOG
-              # - IPC_OWNER
-              # - DAC_OVERRIDE
-              # - DAC_READ_SEARCH
         volumeMounts:
         - name: cgroup
           mountPath: /sys/fs/cgroup
@@ -87,8 +76,13 @@ spec:
         env:
         - name: RUST_LOG
           value: DEBUG
-        - name: RUST_BACKTRACE
-          value: "1"
+        - name: OTEL_EXPORTER_OTLP_LOGS_ENDPOINT
+          # In various places, this value is written without "http://". That does not work.
+          value: http://alloy.monitoring.svc.cluster.local:4317
+        - name: OTEL_EXPORTER_OTLP_LOGS_INSECURE
+          value: "true"
+        - name: OTEL_EXPORTER_OTLP_LOGS_PROTOCOL
+          value: grpc
       volumes:
         - name: cgroup
           hostPath:

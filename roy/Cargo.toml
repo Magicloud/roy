@@ -23,7 +23,7 @@ color-eyre = { version = "*" }
 libc = { version = "*" }
 tokio = { version = "*", features = ["full"] }
 tokio-stream = { version = "*", features = ["full"] }
-# clap = { version = "*", features = ["derive"] }
+clap = { version = "*", features = ["derive"] }
 k8s-openapi = { version = "*", features = ["earliest"] }
 kube = { version = "*" }
 async_from = { version = "*" }
@@ -33,6 +33,14 @@ ipnetwork = { version = "*" }
 tracing = { version = "*" }
 tracing-error = { version = "*" }
 tracing-subscriber = { version = "*", features = ["env-filter"] }
+opentelemetry = { version = "*" }
+opentelemetry_sdk = { version = "*" }
+opentelemetry-appender-tracing = { version = "*" }
+opentelemetry-otlp = { version = "*", default-features = false, features = [
+    "logs",
+    "grpc-tonic",
+] }
+opentelemetry-stdout = { version = "*" }
 
 [build-dependencies]
 aya-build = { workspace = true }

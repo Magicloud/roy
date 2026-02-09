@@ -1,9 +1,10 @@
 FROM ghcr.io/magicloud/rust-stable:latest AS builder
 
+RUN cargo install bpf-linker && rustup toolchain install nightly --component rust-src
+
 WORKDIR /usr/src/myapp
 COPY . .
 
-RUN cargo install bpf-linker && rustup toolchain install nightly --component rust-src
 RUN cargo install --path roy
 
 

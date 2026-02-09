@@ -10,11 +10,11 @@
 #![allow(clippy::multiple_crate_versions)]
 #![allow(clippy::wildcard_dependencies)]
 
-use std::{net::SocketAddr, os::unix::fs::MetadataExt, path::PathBuf};
+use std::{ffi::CStr, net::SocketAddr, os::unix::fs::MetadataExt, path::PathBuf};
 
 use async_from::{AsyncTryFrom, AsyncTryInto};
 use aya::{
-    maps::RingBuf,
+    maps::{MapData, RingBuf},
     programs::{CgroupAttachMode, CgroupSockAddr},
 };
 use eyre::{Result, eyre};
@@ -22,8 +22,10 @@ use futures::{FutureExt, Stream, StreamExt, TryStreamExt};
 use ipnetwork::{IpNetwork, IpNetworkError};
 use k8s_openapi::api::core::v1::Pod;
 use kube::{Api, Client, api::ListParams};
+use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
+use opentelemetry_sdk::{Resource, logs::SdkLoggerProvider};
 use tokio_stream::wrappers::ReadDirStream;
-use tracing::instrument;
+use tracing::{instrument, level_filters::LevelFilter};
 #[rustfmt::skip]
 use tracing::{debug, info, warn};
 use procfs::process::Process;
@@ -32,15 +34,40 @@ use tokio::{
     fs::DirEntry,
     io::{Interest, unix::AsyncFd},
 };
-use tracing_subscriber::{fmt::format::FmtSpan, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_error::ErrorLayer;
+use tracing_subscriber::{
+    EnvFilter, Layer,
+    fmt::{self, format::FmtSpan},
+    layer::SubscriberExt,
+    util::SubscriberInitExt,
+};
 
 #[instrument]
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
+    let log_provider = match opentelemetry_otlp::LogExporter::builder()
+        .with_tonic()
+        .build()
+    {
+        Ok(log_exporter) => SdkLoggerProvider::builder()
+            .with_resource(Resource::builder().with_service_name("roy").build())
+            .with_batch_exporter(log_exporter)
+            .build(),
+        Err(e) => {
+            eprintln!("Cannot initialize OTLP log exporter: {e:?}");
+            SdkLoggerProvider::builder()
+                .with_batch_exporter(opentelemetry_stdout::LogExporter::default())
+                .build()
+        }
+    };
     tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::from_default_env())
-        .with(tracing_subscriber::fmt::layer().with_span_events(FmtSpan::NONE))
-        .with(tracing_error::ErrorLayer::default())
+        .with(
+            fmt::layer()
+                .with_span_events(FmtSpan::NONE)
+                .with_filter(EnvFilter::from_default_env()),
+        )
+        .with(ErrorLayer::default())
+        .with(OpenTelemetryTracingBridge::new(&log_provider).with_filter(LevelFilter::INFO))
         .try_init()?;
     color_eyre::install()?;
 
@@ -52,9 +79,9 @@ async fn main() -> eyre::Result<()> {
     };
     let ret = unsafe { libc::setrlimit(libc::RLIMIT_MEMLOCK, &raw const rlim) };
     if ret != 0 {
-        info!(
+        info!(target: "roy-log", message = format!(
             "remove limit on locked memory failed, ret is: {ret}. This is fine for new kernel that use the memcg based accounting."
-        );
+        ));
     }
 
     // This will include your eBPF object file as raw bytes at compile-time and load it at
@@ -69,14 +96,14 @@ async fn main() -> eyre::Result<()> {
     match aya_log::EbpfLogger::init(&mut ebpf) {
         Err(e) => {
             // This can happen if you remove all log statements from your eBPF program.
-            warn!("failed to initialize eBPF logger: {e}");
+            warn!(target: "roy-log", message = format!("failed to initialize eBPF logger: {e:?}"));
         }
         Ok(logger) => {
             let mut logger = AsyncFd::with_interest(logger, Interest::READABLE)?;
             tokio::task::spawn(async move {
                 loop {
                     let mut guard = logger.readable_mut().await.unwrap();
-                    // guard.get_inner_mut().flush();
+                    guard.get_inner_mut().flush();
                     guard.clear_ready();
                 }
             });
@@ -94,45 +121,78 @@ async fn main() -> eyre::Result<()> {
     let ring = RingBuf::try_from(ebpf.map_mut("EVENTS").unwrap())?;
     let mut ring = AsyncFd::with_interest(ring, Interest::READABLE)?;
     loop {
-        let mut guard = ring.readable_mut().await?;
-        if let Ok(x) = guard.try_io(|inner| {
-            inner
-                .get_mut()
-                .next()
-                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::WouldBlock, "no data"))
-                .map(|x| {
-                    let message: &EventV4 = bytemuck::from_bytes(x.as_ref());
-                    *message
-                })
-        }) {
-            tokio::task::spawn(async {
-                let x = x?;
-                let lan = [
-                    "192.168.0.0/16",
-                    "10.0.0.0/8",
-                    "172.16.0.0/12",
-                    // "127.0.0.0/8",
-                    "169.254.0.0/16",
-                    // "224.0.0.0/4",
-                    "240.0.0.0/4",
-                ]
-                .into_iter()
-                .map(str::parse)
-                .collect::<Result<Vec<IpNetwork>, IpNetworkError>>()?;
-                let ip = (x.addr.to_le_bytes() as [u8; 4]).into();
-                debug!("{ip:?}");
-                if lan.iter().all(|subnet| !subnet.contains(ip))
-                    && !ip.is_loopback()
-                    && !ip.is_multicast()
-                    && !ip.is_unspecified()
-                {
-                    let event: Event = x.async_try_into().await?;
-                    info!("{event:?}");
-                }
-                Ok(()) as eyre::Result<()>
-            })
-            .await??;
+        if let Err(e) = handle_ebpf_output(&mut ring).await {
+            warn!(target: "roy-log", message = format!("handle_ebpf_output failed: {e:?}"));
         }
+    }
+}
+
+async fn handle_ebpf_output(ring: &mut AsyncFd<RingBuf<&mut MapData>>) -> Result<()> {
+    let mut guard = ring.readable_mut().await?;
+    if let Ok(x) = guard.try_io(|inner| {
+        inner
+            .get_mut()
+            .next()
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::WouldBlock, "no data"))
+            .map(|x| {
+                let message: &EventV4 = bytemuck::from_bytes(x.as_ref());
+                *message
+            })
+    }) {
+        tokio::task::spawn(async {
+            let x = x?;
+            let lan = [
+                "192.168.0.0/16",
+                "10.0.0.0/8",
+                "172.16.0.0/12",
+                // "127.0.0.0/8",
+                "169.254.0.0/16",
+                // "224.0.0.0/4",
+                "240.0.0.0/4",
+            ]
+            .into_iter()
+            .map(str::parse)
+            .collect::<Result<Vec<IpNetwork>, IpNetworkError>>()?;
+            let ip = (x.addr.to_le_bytes() as [u8; 4]).into();
+            if lan.iter().all(|subnet| !subnet.contains(ip))
+                && !ip.is_loopback()
+                && !ip.is_multicast()
+                && !ip.is_unspecified()
+            {
+                let event: Event = x.async_try_into().await?;
+                report(event);
+            }
+            Ok(()) as eyre::Result<()>
+        })
+        .await??;
+    }
+    Ok(())
+}
+
+fn report(event: Event) {
+    let pod = event.pod.unwrap_or_default();
+    match event.process {
+        PidOrCmd::Pid(pid) => info!(target: "roy-report",
+            pid = pid.to_string(),
+            socket_add = event.socket_addr.to_string(),
+            namespace = pod.namespace,
+            pod = pod.name,
+            container = pod.container_name,
+        ),
+        PidOrCmd::Cmdline(items) => info!(target: "roy-report",
+            cli = items.join(" "),
+            socket_add = event.socket_addr.to_string(),
+            namespace = pod.namespace,
+            pod = pod.name,
+            container = pod.container_name,
+        ),
+        PidOrCmd::PartialCmd(cmd) => info!(target: "roy-report",
+            cmd = cmd,
+            socket_add = event.socket_addr.to_string(),
+            namespace = pod.namespace,
+            pod = pod.name,
+            container = pod.container_name,
+        ),
     }
 }
 
@@ -150,11 +210,11 @@ impl AsyncTryFrom<EventV4> for Event {
         let (pc, cmd): (Option<(String, String)>, PidOrCmd) = match get_info_from_process(&value) {
             Ok(x) => x,
             Err(e) => {
-                info!("{e:?}");
+                info!(target: "roy-log", message = format!("Unable to fetch process data for Pid {}: {e:?}", value.pid));
                 match get_info_from_cgroup(&value).await {
                     Ok(x) => x,
                     Err(e) => {
-                        info!("{e:?}");
+                        info!(target: "roy-log", message = format!("Unable to fetch cgroup data for Pid {}: {e:?}", value.pid));
                         (
                             None,
                             PidOrCmd::PartialCmd(String::from_utf8_lossy(&value.cmd).into()),
@@ -232,9 +292,11 @@ fn get_info_from_process(value: &EventV4) -> Result<(Option<(String, String)>, P
         .cgroups()?
         .into_iter()
         .find_map(|x| {
+            // The path is relevent. And due to the mount of host proc
+            // it would start at current container (the one runnign Roy).
+            // Then ../../ to kubepods level.
             let mut segs = x.pathname.split('/');
-            if segs.next()?.contains("kubepods") {
-                let _pod_type = segs.next()?;
+            if segs.next()?.is_empty() && segs.next()? == ".." && segs.next()? == ".." {
                 let pod = segs.next()?;
                 let container = segs.next()?;
                 Some((pod.to_owned(), container.to_owned()))
@@ -281,7 +343,7 @@ async fn get_info_from_cgroup(value: &EventV4) -> Result<(Option<(String, String
             .map(std::borrow::ToOwned::to_owned)
     });
 
-    let cmd = PidOrCmd::PartialCmd(String::from_utf8_lossy(&value.cmd).into());
+    let cmd = PidOrCmd::PartialCmd(CStr::from_bytes_until_nul(&value.cmd)?.to_str()?.to_owned());
 
     Ok((
         pod.and_then(|p| {
@@ -293,7 +355,7 @@ async fn get_info_from_cgroup(value: &EventV4) -> Result<(Option<(String, String
     )) as Result<_>
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct K8SPod {
     namespace: String,
     name: String,
@@ -321,7 +383,7 @@ async fn guess_kubepods_cgroup() -> Result<Option<PathBuf>> {
             break;
         }
     }
-    info!("{ret:?}");
+    info!(target: "roy-log", message = format!("{ret:?}"));
     Ok(ret)
 }
 
