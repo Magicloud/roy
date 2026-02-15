@@ -10,13 +10,19 @@
 #![allow(clippy::multiple_crate_versions)]
 #![allow(clippy::wildcard_dependencies)]
 
-use std::{ffi::CStr, net::SocketAddr, os::unix::fs::MetadataExt, path::PathBuf};
+use std::{
+    ffi::CStr,
+    net::{AddrParseError, IpAddr, SocketAddr},
+    os::unix::fs::MetadataExt,
+    path::PathBuf,
+};
 
 use async_from::{AsyncTryFrom, AsyncTryInto};
 use aya::{
     maps::{MapData, RingBuf},
     programs::{CgroupAttachMode, CgroupSockAddr},
 };
+use bytemuck::PodCastError;
 use eyre::{Result, eyre};
 use futures::{FutureExt, Stream, StreamExt, TryStreamExt};
 use ipnetwork::{IpNetwork, IpNetworkError};
@@ -29,7 +35,6 @@ use tracing::{instrument, level_filters::LevelFilter};
 #[rustfmt::skip]
 use tracing::{debug, info, warn};
 use procfs::process::Process;
-use roy_common::EventV4;
 use tokio::{
     fs::DirEntry,
     io::{Interest, unix::AsyncFd},
@@ -110,13 +115,21 @@ async fn main() -> eyre::Result<()> {
         }
     }
 
-    let program: &mut CgroupSockAddr = ebpf.program_mut("roy4").unwrap().try_into()?;
-    program.load()?;
+    let roy4: &mut CgroupSockAddr = ebpf.program_mut("roy4").unwrap().try_into()?;
+    roy4.load()?;
     let cgroup = guess_kubepods_cgroup()
         .await?
         .ok_or_else(|| eyre!("Could not find K8S Cgroup"))?;
     let cgroup = std::fs::File::open(cgroup)?;
-    program.attach(cgroup, CgroupAttachMode::Single)?;
+    roy4.attach(cgroup, CgroupAttachMode::Single)?;
+
+    let roy6: &mut CgroupSockAddr = ebpf.program_mut("roy6").unwrap().try_into()?;
+    roy6.load()?;
+    let cgroup = guess_kubepods_cgroup()
+        .await?
+        .ok_or_else(|| eyre!("Could not find K8S Cgroup"))?;
+    let cgroup = std::fs::File::open(cgroup)?;
+    roy6.attach(cgroup, CgroupAttachMode::Single)?;
 
     let ring = RingBuf::try_from(ebpf.map_mut("EVENTS").unwrap())?;
     let mut ring = AsyncFd::with_interest(ring, Interest::READABLE)?;
@@ -129,43 +142,59 @@ async fn main() -> eyre::Result<()> {
 
 async fn handle_ebpf_output(ring: &mut AsyncFd<RingBuf<&mut MapData>>) -> Result<()> {
     let mut guard = ring.readable_mut().await?;
-    if let Ok(x) = guard.try_io(|inner| {
+    match guard.try_io(|inner| {
         inner
             .get_mut()
             .next()
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::WouldBlock, "no data"))
             .map(|x| {
-                let message: &EventV4 = bytemuck::from_bytes(x.as_ref());
-                *message
+                let message: Result<&roy_common::Event, PodCastError> =
+                    bytemuck::try_from_bytes(x.as_ref());
+                message.copied()
             })
+            .transpose()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{e:?}")))
     }) {
-        tokio::task::spawn(async {
-            let x = x?;
-            let lan = [
-                "192.168.0.0/16",
-                "10.0.0.0/8",
-                "172.16.0.0/12",
-                // "127.0.0.0/8",
-                "169.254.0.0/16",
-                // "224.0.0.0/4",
-                "240.0.0.0/4",
-            ]
-            .into_iter()
-            .map(str::parse)
-            .collect::<Result<Vec<IpNetwork>, IpNetworkError>>()?;
-            let ip = (x.addr.to_le_bytes() as [u8; 4]).into();
-            if lan.iter().all(|subnet| !subnet.contains(ip))
-                && !ip.is_loopback()
-                && !ip.is_multicast()
-                && !ip.is_unspecified()
-            {
-                let event: Event = x.async_try_into().await?;
-                report(event);
-            }
-            Ok(()) as eyre::Result<()>
-        })
-        .await??;
+        Ok(Ok(Some(x))) => {
+            tokio::task::spawn(async move {
+                let lan = [
+                    "192.168.0.0/16",
+                    "10.0.0.0/8",
+                    "172.16.0.0/12",
+                    // "127.0.0.0/8",
+                    "169.254.0.0/16",
+                    // "224.0.0.0/4",
+                    "240.0.0.0/4",
+                    "fc00::/7",
+                ]
+                .into_iter()
+                .map(str::parse)
+                .collect::<Result<Vec<IpNetwork>, IpNetworkError>>()?;
+                let special_addr = std::iter::once("::ffff:127.0.0.1")
+                    .map(str::parse)
+                    .collect::<Result<Vec<IpAddr>, AddrParseError>>()?;
+                let ip = if x.ipv == 0 {
+                    (x.addr4.to_le_bytes() as [u8; 4]).into()
+                } else {
+                    annoying(x.addr6).into()
+                };
+                if lan.iter().all(|subnet| !subnet.contains(ip))
+                    && !special_addr.contains(&ip)
+                    && !ip.is_loopback()
+                    && !ip.is_multicast()
+                    && !ip.is_unspecified()
+                {
+                    let event: Event = x.async_try_into().await?;
+                    report(event);
+                }
+                Ok(()) as eyre::Result<()>
+            })
+            .await??;
+        }
+        Ok(Ok(None)) => (),
+        Ok(Err(e)) => Err(e)?,
+        Err(e) => Err(eyre!("{e:?}"))?,
     }
+
     Ok(())
 }
 
@@ -196,6 +225,30 @@ fn report(event: Event) {
     }
 }
 
+// IPv6 is always BE
+// SockAddr is probably host byte order, which is LE on x86
+// Hence it requires double converting
+#[allow(clippy::cast_possible_truncation)]
+const fn annoying(input: [u32; 4]) -> [u16; 8] {
+    let be = [
+        input[0].to_be(),
+        input[1].to_be(),
+        input[2].to_be(),
+        input[3].to_be(),
+    ];
+
+    [
+        (be[0] >> 16) as u16,
+        be[0] as u16,
+        (be[1] >> 16) as u16,
+        be[1] as u16,
+        (be[2] >> 16) as u16,
+        be[2] as u16,
+        (be[3] >> 16) as u16,
+        be[3] as u16,
+    ]
+}
+
 #[derive(Debug)]
 struct Event {
     process: PidOrCmd,
@@ -203,10 +256,10 @@ struct Event {
     pod: Option<K8SPod>,
 }
 #[async_from::async_trait]
-impl AsyncTryFrom<EventV4> for Event {
+impl AsyncTryFrom<roy_common::Event> for Event {
     type Error = eyre::Report;
 
-    async fn async_try_from(value: EventV4) -> Result<Self, Self::Error> {
+    async fn async_try_from(value: roy_common::Event) -> Result<Self, Self::Error> {
         let (pc, cmd): (Option<(String, String)>, PidOrCmd) = match get_info_from_process(&value) {
             Ok(x) => x,
             Err(e) => {
@@ -276,7 +329,11 @@ impl AsyncTryFrom<EventV4> for Event {
         Ok(Self {
             process: cmd,
             socket_addr: (
-                value.addr.to_le_bytes() as [u8; 4],
+                if value.ipv == 0 {
+                    IpAddr::from(value.addr4.to_le_bytes() as [u8; 4])
+                } else {
+                    annoying(value.addr6).into()
+                },
                 u16::try_from(value.port)?.to_be(),
             )
                 .into(),
@@ -285,7 +342,9 @@ impl AsyncTryFrom<EventV4> for Event {
     }
 }
 
-fn get_info_from_process(value: &EventV4) -> Result<(Option<(String, String)>, PidOrCmd)> {
+fn get_info_from_process(
+    value: &roy_common::Event,
+) -> Result<(Option<(String, String)>, PidOrCmd)> {
     let proc = Process::new_with_root(PathBuf::from("/host/proc").join(value.pid.to_string()))?;
     debug!("get proc");
     let (pod_uid, container_uid) = proc
@@ -317,7 +376,9 @@ fn get_info_from_process(value: &EventV4) -> Result<(Option<(String, String)>, P
     Ok((Some((pod_uid, container_uid)), cmd)) as eyre::Result<_>
 }
 
-async fn get_info_from_cgroup(value: &EventV4) -> Result<(Option<(String, String)>, PidOrCmd)> {
+async fn get_info_from_cgroup(
+    value: &roy_common::Event,
+) -> Result<(Option<(String, String)>, PidOrCmd)> {
     let containers = walk_containers()
         .await?
         .ok_or_else(|| eyre!("Kubepods CGROUP not found"))?;

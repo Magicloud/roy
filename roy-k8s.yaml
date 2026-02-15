@@ -58,7 +58,7 @@ spec:
             value: "5"
       containers:
       - name: roy
-        image: localhost:5000/roy:test31
+        image: localhost:5000/roy:test38
         securityContext:
           capabilities:
             add:

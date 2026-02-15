@@ -13,13 +13,14 @@
 
 use bytemuck::{Pod, Zeroable};
 
-#[derive(Copy, Clone, Pod, Zeroable, Default)]
+#[derive(Copy, Clone, Pod, Zeroable)]
 #[repr(C)]
-pub struct EventV4 {
+pub struct Event {
     pub cgroup: u64,
     pub cmd: [u8; 16],
     pub pid: u32,
-    pub addr: u32,
+    pub addr4: u32,
+    pub addr6: [u32; 4],
     pub port: u32,
-    pub padding: u32,
+    pub ipv: u32, // 0 is IPv4, 1 is IPv6
 }
