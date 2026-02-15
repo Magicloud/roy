@@ -4,7 +4,7 @@ members = ["roy", "roy-common", "roy-ebpf"]
 default-members = ["roy", "roy-common"]
 
 [workspace.package]
-version = "2026.2.12"
+version = "2026.2.15"
 license = "MIT OR Apache-2.0"
 edition = "2024"
 description = "Kubernetes AdmissionControl webhook to validate or mutate Ingress/Gateway to ensure it contains TLS setup"

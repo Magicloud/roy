@@ -40,7 +40,7 @@ spec:
     metadata:
       labels:
         app: roy
-        logs: disabled
+        # logs: disabled
     spec:
       serviceAccountName: roy
       automountServiceAccountToken: true
@@ -58,7 +58,7 @@ spec:
             value: "5"
       containers:
       - name: roy
-        image: localhost:5000/roy:test38
+        image: localhost:5000/roy:test41
         securityContext:
           capabilities:
             add:

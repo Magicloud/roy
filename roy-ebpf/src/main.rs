@@ -51,7 +51,6 @@ pub fn roy4(ctx: SockAddrContext) -> i32 {
 #[allow(clippy::needless_pass_by_value)]
 #[cgroup_sock_addr(connect6)]
 pub fn roy6(ctx: SockAddrContext) -> i32 {
-    aya_log_ebpf::debug!(&ctx, "Enter");
     let sock_addr = unsafe { &*ctx.sock_addr };
     let cgroup = unsafe { bpf_get_current_cgroup_id() };
     let cmd = bpf_get_current_comm().unwrap_or_default();

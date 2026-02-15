@@ -26,10 +26,11 @@ use bytemuck::PodCastError;
 use eyre::{Result, eyre};
 use futures::{FutureExt, Stream, StreamExt, TryStreamExt};
 use ipnetwork::{IpNetwork, IpNetworkError};
-use k8s_openapi::api::core::v1::Pod;
+use k8s_openapi::api::core::v1::{ContainerStatus, Pod};
 use kube::{Api, Client, api::ListParams};
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_sdk::{Resource, logs::SdkLoggerProvider};
+use ouroboros::self_referencing;
 use tokio_stream::wrappers::ReadDirStream;
 use tracing::{instrument, level_filters::LevelFilter};
 #[rustfmt::skip]
@@ -199,29 +200,62 @@ async fn handle_ebpf_output(ring: &mut AsyncFd<RingBuf<&mut MapData>>) -> Result
 }
 
 fn report(event: Event) {
-    let pod = event.pod.unwrap_or_default();
-    match event.process {
-        PidOrCmd::Pid(pid) => info!(target: "roy-report",
-            pid = pid.to_string(),
-            socket_add = event.socket_addr.to_string(),
-            namespace = pod.namespace,
-            pod = pod.name,
-            container = pod.container_name,
-        ),
-        PidOrCmd::Cmdline(items) => info!(target: "roy-report",
-            cli = items.join(" "),
-            socket_add = event.socket_addr.to_string(),
-            namespace = pod.namespace,
-            pod = pod.name,
-            container = pod.container_name,
-        ),
-        PidOrCmd::PartialCmd(cmd) => info!(target: "roy-report",
-            cmd = cmd,
-            socket_add = event.socket_addr.to_string(),
-            namespace = pod.namespace,
-            pod = pod.name,
-            container = pod.container_name,
-        ),
+    let skip_annotation = "roy.magiclouds.cn/skip".to_string();
+    let empty_string = String::new();
+    if let Some(pod) = event.pod {
+        let p = pod.borrow_pod();
+        let c = pod.borrow_container();
+        let ns = p.metadata.namespace.as_ref().unwrap_or(&empty_string);
+        let n = p.metadata.name.as_ref().unwrap_or(&empty_string);
+        let cn = c.map(|c| &c.name).unwrap_or(&empty_string);
+        if pod
+            .borrow_pod()
+            .metadata
+            .annotations
+            .as_ref()
+            .is_none_or(|a| a.get(&skip_annotation).is_none_or(|v| v != "true"))
+        {
+            match event.process {
+                PidOrCmd::Pid(pid) => info!(target: "roy-report",
+                    pid = pid.to_string(),
+                    socket_add = event.socket_addr.to_string(),
+                    namespace = ns,
+                    pod = n,
+                    container = cn,
+                ),
+                PidOrCmd::Cmdline(items) => info!(target: "roy-report",
+                    cli = items.join(" "),
+                    socket_add = event.socket_addr.to_string(),
+                    namespace = ns,
+                    pod = n,
+                    container = cn,
+                ),
+                PidOrCmd::PartialCmd(cmd) => info!(target: "roy-report",
+                    cmd = cmd,
+                    socket_add = event.socket_addr.to_string(),
+                    namespace = ns,
+                    pod = n,
+                    container = cn,
+                ),
+            }
+        } else {
+            debug!("Skip logging {ns}/{n}/{cn}");
+        }
+    } else {
+        match event.process {
+            PidOrCmd::Pid(pid) => info!(target: "roy-report",
+                pid = pid.to_string(),
+                socket_add = event.socket_addr.to_string(),
+            ),
+            PidOrCmd::Cmdline(items) => info!(target: "roy-report",
+                cli = items.join(" "),
+                socket_add = event.socket_addr.to_string(),
+            ),
+            PidOrCmd::PartialCmd(cmd) => info!(target: "roy-report",
+                cmd = cmd,
+                socket_add = event.socket_addr.to_string(),
+            ),
+        }
     }
 }
 
@@ -287,11 +321,6 @@ impl AsyncTryFrom<roy_common::Event> for Event {
                 .await?
                 .into_iter()
                 .find(|x| x.metadata.uid.as_ref().is_some_and(|x| pod_uid.contains(x)));
-            if pod.is_some() {
-                debug!("Found pod");
-            } else {
-                debug!("Found no pod");
-            }
             if let Some((ns, n)) = pod.and_then(|p| {
                 p.metadata
                     .namespace
@@ -299,31 +328,28 @@ impl AsyncTryFrom<roy_common::Event> for Event {
             }) {
                 let pods: Api<Pod> = Api::namespaced(client, &ns);
                 let pod = pods.get_opt(&n).await?;
-                let container = pod.and_then(|p| {
-                    // Is it possible that I cannot find the container?
-                    Some(
-                        p.status?
-                            .container_statuses?
-                            .iter()
-                            .find(|cs| {
-                                cs.container_id
-                                    .as_ref()
-                                    .is_some_and(|x| x.contains(&container_uid))
-                            })?
-                            .name
-                            .clone(),
-                    )
-                });
-                if container.is_some() {
-                    debug!("Found container");
-                } else {
-                    debug!("Found no container");
+                if let Some(pod) = pod {
+                    ret = Some(
+                        K8SPodBuilder {
+                            pod,
+                            container_builder: |pod| {
+                                let x = pod
+                                    .status
+                                    .as_ref()?
+                                    .container_statuses
+                                    .as_ref()?
+                                    .iter()
+                                    .find(|cs| {
+                                        cs.container_id
+                                            .as_ref()
+                                            .is_some_and(|x| x.contains(&container_uid))
+                                    })?;
+                                Some(x)
+                            },
+                        }
+                        .build(),
+                    );
                 }
-                ret = container.map(|c| K8SPod {
-                    namespace: ns,
-                    name: n,
-                    container_name: c,
-                });
             }
         }
         Ok(Self {
@@ -416,11 +442,14 @@ async fn get_info_from_cgroup(
     )) as Result<_>
 }
 
-#[derive(Debug, Default)]
+// #[allow(clippy::ref_option_ref)] does not work
+#[self_referencing]
+#[derive(Debug)]
 struct K8SPod {
-    namespace: String,
-    name: String,
-    container_name: String,
+    pod: Pod,
+    #[borrows(pod)]
+    #[covariant]
+    container: Option<&'this ContainerStatus>,
 }
 
 #[derive(Debug)]

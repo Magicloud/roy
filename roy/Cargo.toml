@@ -41,6 +41,7 @@ opentelemetry-otlp = { version = "*", default-features = false, features = [
     "grpc-tonic",
 ] }
 opentelemetry-stdout = { version = "*" }
+ouroboros = { version = "*" }
 
 [build-dependencies]
 aya-build = { workspace = true }
