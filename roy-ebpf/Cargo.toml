@@ -1,0 +1,23 @@
+[package]
+name = "roy-ebpf"
+version.workspace = true
+edition.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme.workspace = true
+
+[dependencies]
+roy-common = { path = "../roy-common" }
+
+aya-ebpf = { workspace = true }
+aya-log-ebpf = { workspace = true }
+
+[build-dependencies]
+which = { version = "*" }
+
+[[bin]]
+name = "roy"
+path = "src/main.rs"

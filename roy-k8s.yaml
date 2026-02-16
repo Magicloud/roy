@@ -1,0 +1,94 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: roy
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["list", "get"]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: roy
+  namespace: kube-system
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: roy
+subjects:
+- kind: ServiceAccount
+  name: roy
+  namespace: kube-system
+roleRef:
+  kind: ClusterRole
+  name: roy
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: roy
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      app: roy
+  template:
+    metadata:
+      labels:
+        app: roy
+        # logs: disabled
+    spec:
+      serviceAccountName: roy
+      automountServiceAccountToken: true
+      hostNetwork: true
+      dnsPolicy: "None"
+      dnsConfig:
+        nameservers:
+          - "10.43.0.10"
+        searches:
+          - "kube-system.svc.cluster.local"
+          - "svc.cluster.local"
+          - "cluster.local"
+        options:
+          - name: ndots
+            value: "5"
+      containers:
+      - name: roy
+        image: localhost:5000/roy:test41
+        securityContext:
+          capabilities:
+            add:
+              - BPF
+              - SYS_RESOURCE
+              - NET_ADMIN
+              - PERFMON
+        volumeMounts:
+        - name: cgroup
+          mountPath: /sys/fs/cgroup
+          readOnly: true
+        - name: proc
+          mountPath: /host/proc
+          readOnly: true
+        env:
+        - name: RUST_LOG
+          value: DEBUG
+        - name: OTEL_EXPORTER_OTLP_LOGS_ENDPOINT
+          # In various places, this value is written without "http://". That does not work.
+          value: http://alloy.monitoring.svc.cluster.local:4317
+        - name: OTEL_EXPORTER_OTLP_LOGS_INSECURE
+          value: "true"
+        - name: OTEL_EXPORTER_OTLP_LOGS_PROTOCOL
+          value: grpc
+      volumes:
+        - name: cgroup
+          hostPath:
+            path: /sys/fs/cgroup
+            type: Directory
+        - name: proc
+          hostPath:
+            path: /proc
+            type: Directory
