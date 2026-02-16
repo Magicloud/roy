@@ -1,0 +1,34 @@
+name: Container Image
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - '**'
+
+jobs:
+  build-n-push:
+    runs-on: ubuntu-latest
+    steps:
+
+    # - name: Lowercase Repo Name
+    #   run: echo "REPO_NAME=$(echo -n "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Login
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Build and push
+      uses: docker/build-push-action@v6
+      with:
+        push: true
+        file: Containerfile
+        tags: |
+          ghcr.io/magicloud/ingress-tls:${{ github.ref_name }}
+          ghcr.io/magicloud/ingress-tls:latest
