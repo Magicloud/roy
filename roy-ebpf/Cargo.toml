@@ -16,7 +16,7 @@ aya-ebpf = { workspace = true }
 aya-log-ebpf = { workspace = true }
 
 [build-dependencies]
-which = { version = "*" }
+which = { version = "8" }
 
 [[bin]]
 name = "roy"
