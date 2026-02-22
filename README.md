@@ -1,5 +1,16 @@
-# roy
+# Roy
+
 Report pods in K8S that connect to outside.
+
+This tool using eBPF to watch (read-only) `connect` system calls from K8S pods cgroup. And analyze them in userspace.
+
+If the connecting call was to an Internet address, this tool would furtherly try to get the process' pod information.
+
+All results are sent to OTLP as LogRecord.
+
+Running in container requires some capabilities. Please refer to roy-k8s.yaml.
+
+## From Aya
 
 ## Prerequisites
 

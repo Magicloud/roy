@@ -10,8 +10,6 @@ RUN cargo install --path roy
 
 FROM debian:trixie
 
-# EXPOSE 443/TCP
-
 COPY --from=builder /usr/local/cargo/bin/roy /usr/local/bin/roy
 
 ENTRYPOINT ["roy"]

@@ -18,36 +18,36 @@ bytemuck = { workspace = true, default-features = false, features = ["derive"] }
 
 
 # Tried Smol. AsyncIO crate involves unsafe. Why Tokio AsyncFd could work without me to unsafe?
-eyre = { version = "*" }
-color-eyre = { version = "*" }
-libc = { version = "*" }
-tokio = { version = "*", features = ["full"] }
-tokio-stream = { version = "*", features = ["full"] }
-clap = { version = "*", features = ["derive"] }
-k8s-openapi = { version = "*", features = ["earliest"] }
-kube = { version = "*" }
-async_from = { version = "*" }
-procfs = { version = "*" }
-futures = { version = "*" }
-ipnetwork = { version = "*" }
-tracing = { version = "*" }
-tracing-error = { version = "*" }
-tracing-subscriber = { version = "*", features = ["env-filter"] }
-opentelemetry = { version = "*" }
-opentelemetry_sdk = { version = "*" }
-opentelemetry-appender-tracing = { version = "*" }
-opentelemetry-otlp = { version = "*", default-features = false, features = [
+eyre = { version = "0.6" }
+color-eyre = { version = "0.6" }
+libc = { version = "0.2" }
+tokio = { version = "1", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+k8s-openapi = { version = "0.27", features = ["earliest"] }
+kube = { version = "3" }
+async_from = { version = "0.2" }
+procfs = { version = "0.18" }
+futures = { version = "0.3" }
+ipnetwork = { version = "0.21" }
+tracing = { version = "0.1" }
+tracing-error = { version = "0.2" }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+opentelemetry = { version = "0.31" }
+opentelemetry_sdk = { version = "0.31" }
+opentelemetry-appender-tracing = { version = "0.31" }
+opentelemetry-otlp = { version = "0.31", default-features = false, features = [
     "logs",
     "grpc-tonic",
 ] }
-opentelemetry-stdout = { version = "*" }
-ouroboros = { version = "*" }
+opentelemetry-stdout = { version = "0.31" }
+ouroboros = { version = "0.18" }
 
 [build-dependencies]
 aya-build = { workspace = true }
 
-eyre = { version = "*" }
-cargo_metadata = { version = "*" }
+eyre = { version = "0.6" }
+cargo_metadata = { version = "0.23" }
 # TODO(https://github.com/rust-lang/cargo/issues/12375): this should be an artifact dependency, but
 # it's not possible to tell cargo to use `-Z build-std` to build it. We cargo-in-cargo in the build
 # script to build this, but we want to teach cargo about the dependency so that cache invalidation
